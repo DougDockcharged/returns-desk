@@ -48,6 +48,7 @@ function readHashToken(){
   return {token: p.get("access_token"), exp: Date.now() + (Number(p.get("expires_in")||3600) - 120) * 1000};
 }
 function signIn(prompt){
+  if (!CFG.clientId || CFG.clientId.includes("REPLACE")) { alert("Returns Desk is almost ready: its Google sign-in key isn't set up yet. Ask Claude to finish setup."); return; }
   const state = Math.random().toString(36).slice(2);
   ls.set("rd-state", state);
   const q = new URLSearchParams({client_id: CFG.clientId, redirect_uri: redirectUri(), response_type: "token",
