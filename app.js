@@ -314,6 +314,8 @@ function statusNotice(c){
   if (c.product_name) kv.push(["Item", esc(c.product_name)]);
   if (c.order_id) kv.push(["Order", `<span class="mono">${esc(c.order_id)}</span>`]);
   if (c.lpn) kv.push(["LPN", `<span class="mono">${esc(c.lpn)}</span>`]);
+  if (c.shipment_id) kv.push(["Shipment", `<span class="mono">${esc(c.shipment_id)}</span>`]);
+  if (c.claude_note && st === "ready") kv.push(["Claude", esc(c.claude_note)]);
   const kvHtml = kv.length ? `<dl class="kv">${kv.map(([a,b])=>`<dt>${a}</dt><dd>${b}</dd>`).join("")}</dl>` : "";
   const note = c.claude_note ? `<span>${esc(c.claude_note)}</span>` : "";
   if (st === "ready") return `<div class="notice info"><strong>Sent to Claude.</strong><span>Claude picks this up on its next check (9 am and 3 pm), files the claim with Amazon and shows the case ID here. You can still add photos or a note until then.</span>${kvHtml}</div>`;
