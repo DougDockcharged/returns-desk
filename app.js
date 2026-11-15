@@ -457,7 +457,22 @@ document.addEventListener("visibilitychange", () => { if (document.visibilitySta
 setInterval(() => { if (document.visibilityState === "visible" && !openId) refresh(); }, 60000);
 
 // ---------------- boot ----------------
-if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
+// Updates: check for a new version whenever the app comes to the front, and reload into it
+// as soon as it's installed (unless photos are still uploading).
+if ("serviceWorker" in navigator) {
+  const hadController = !!navigator.serviceWorker.controller;
+  let reloading = false;
+  const busy = () => Object.values(pending).some(m => Object.values(m).flat().some(x => x.state === "up"));
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (!hadController || reloading) return;
+    const go = () => { if (busy()) return setTimeout(go, 2000); reloading = true; location.reload(); };
+    go();
+  });
+  navigator.serviceWorker.register("sw.js", {updateViaCache: "none"}).then(reg => {
+    document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") reg.update().catch(() => {}); });
+    reg.update().catch(() => {});
+  }).catch(() => {});
+}
 const auth = loadToken();
 if (auth.error) render.authError = auth.error;
 if (!auth.ok && auth.expired && !auth.error) { signIn(); }
