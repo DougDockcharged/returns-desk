@@ -3,12 +3,8 @@
 const CFG = window.RD_CONFIG;
 const ACCOUNTS = [["dockcharged","DockCharged"],["momentum","Momentum"]];
 const REASONS = [["switcheroo","Switcheroo"],["empty_box","Empty box"],["wrong_item","Wrong item"],["damaged_used","Damaged / used"]];
-const SLOTS = [
-  {key:"slip", name:"Return label / packing slip", need:1, hint:"Whole slip, flat, readable. Shipment ID and order ID must be sharp."},
-  {key:"lpn", name:"LPN sticker", need:1, hint:"Close-up of the LPN barcode sticker Amazon put on the unit."},
-  {key:"item", name:"Item, all sides", need:4, hint:"Top, bottom, front, back, left, right. Add serial / model plate and the mismatch or wear up close."},
-  {key:"packaging", name:"Packaging", need:0, hint:"Optional. Box sides, seals, anything that shows it isn't our original package."},
-];
+// All new photos go in one pile ("photos"); Claude sorts them. Older rows used the per-type columns.
+const SLOT_KEYS = ["photos","slip","lpn","item","packaging"];
 const STATUS = {
   draft:["Draft","draft"], ready:["Sent to Claude",""], filing:["Claude is filing",""],
   filed:["Filed, waiting on Amazon",""], needs_you:["Needs you","needs_you"],
@@ -19,7 +15,7 @@ const TABS = [["open","Open"],["needs_you","Needs you"],["filed","Filed"],["clos
 const COLS = ["id","created_at","updated_at","status","account","reason","order_id","lpn","notes",
   "slip_photos","lpn_photos","item_photos","packaging_photos","drive_folder",
   "shipment_id","asin","sku","product_name","amount","claim_type","case_id","filed_at",
-  "claude_note","question","reply","recovered_amount","closed_at","sent_at","replied_at"];
+  "claude_note","question","reply","recovered_amount","closed_at","sent_at","replied_at","photos"];
 const TAB = "Returns";
 const LASTCOL = colLetter(COLS.length);
 
@@ -115,7 +111,10 @@ async function fetchRows(){
   }).filter(o => o.id);
 }
 function toRow(o){ return header.map(h => o[h] == null ? "" : String(o[h])); }
-function photoIds(c, slot){ return String(c[slot + "_photos"] || "").split(",").map(s => s.trim()).filter(Boolean); }
+const colOf = slot => slot === "photos" ? "photos" : slot + "_photos";
+function photoIds(c, slot){ return String(c[colOf(slot)] || "").split(",").map(s => s.trim()).filter(Boolean); }
+function allPhotos(c){ return SLOT_KEYS.flatMap(k => photoIds(c, k).map(fid => ({slot:k, fid}))); }
+const EDITABLE = ["draft","ready","needs_you"];
 
 let chain = Promise.resolve();
 function serial(fn){ const p = chain.catch(()=>{}).then(fn); chain = p; return p; }
@@ -238,33 +237,33 @@ function render(){
     `<button type="button" data-tab="${k}" aria-pressed="${tab===k}">${l}${k==="needs_you"&&nNeed?` · ${nNeed}`:""}</button>`).join("") + `</nav>`;
   if (loadError) h += `<div class="notice bad"><strong>Couldn't load your returns.</strong><span class="small">${esc(loadError)}</span><button type="button" id="retryBtn">Try again</button></div>`;
   else if (!loaded) h += `<div class="empty"><strong>Loading your returns…</strong><span class="muted small">First time, this also creates the Returns Desk folder and sheet in your Drive.</span></div>`;
-  else if (!claims.length) h += `<div class="empty"><strong>No returns logged yet.</strong><span class="muted small">Tap <b>New return</b>, shoot the slip, the LPN sticker and the item from every side, pick DockCharged or Momentum, then send it to Claude to file the reimbursement claim.</span></div>`;
+  else if (!claims.length) h += `<div class="empty"><strong>No returns logged yet.</strong><span class="muted small">Tap <b>New return</b> and shoot the slip, the LPN sticker and the item. Then tap <b>Send to Claude</b>. Claude works out the account, order, LPN and reason from the photos and files the claim.</span></div>`;
   else if (!rows.length) h += `<div class="empty"><span class="muted">Nothing here.</span></div>`;
   else h += `<div class="list">` + rows.map(rowHtml).join("") + `</div>`;
   if (loaded && sheetId) h += `<p class="small muted">Records: <a href="https://docs.google.com/spreadsheets/d/${esc(sheetId)}" target="_blank" rel="noopener">Returns Desk sheet</a></p>`;
   v.innerHTML = h;
-  setFab(loaded ? `<button type="button" class="primary" id="newBtn">+ New return</button>` : "");
+  setFab(loaded ? `<label class="primary bigbtn" for="newCam">📷 New return<input type="file" id="newCam" accept="image/*" capture="environment" data-new="1"></label><label class="bigbtn lib" for="newLib">Library<input type="file" id="newLib" accept="image/*" multiple data-new="1"></label>` : "");
   hydrateImages();
 }
 
 function rowHtml(c){
   const st = STATUS[c.status||"draft"] || STATUS.draft;
-  const first = photoIds(c,"item")[0] || photoIds(c,"slip")[0] || photoIds(c,"lpn")[0] || photoIds(c,"packaging")[0];
-  const n = SLOTS.reduce((a,s)=>a+photoIds(c,s.key).length,0);
-  const title = c.order_id || c.lpn || "Untitled return";
+  const ph = allPhotos(c);
+  const first = (ph.find(p => p.slot === "item") || ph[0] || {}).fid;
+  const n = ph.length;
+  const title = c.product_name || c.order_id || c.lpn || `Return · ${fmtDate(c.created_at)}`;
   const amt = c.status === "won" && c.recovered_amount ? ` · $${esc(c.recovered_amount)}` : (c.amount ? ` · $${esc(c.amount)}` : "");
   return `<button type="button" class="row" data-open="${esc(c.id)}">
     ${first ? `<img class="thumb" data-fid="${esc(first)}" alt="">` : `<span class="thumb" aria-hidden="true"></span>`}
     <span class="meta"><span class="t mono">${esc(title)}</span>
-      <span class="small muted">${esc(label(ACCOUNTS,c.account))} · ${esc(label(REASONS,c.reason))} · ${n} photo${n===1?"":"s"}${amt}</span>
+      <span class="small muted">${[c.account?label(ACCOUNTS,c.account):"", c.reason?label(REASONS,c.reason):"", `${n} photo${n===1?"":"s"}`].filter(Boolean).map(esc).join(" · ")}${amt}</span>
       <span class="small muted">${fmtDate(c.created_at)}${c.case_id?` · case <span class="mono">${esc(c.case_id)}</span>`:""}</span></span>
     <span class="pill ${st[1]}">${st[0]}</span></button>`;
 }
 
 function readiness(c){
   const pend = Object.values(pending[c.id]||{}).flat().some(x => x.state === "up");
-  const items = SLOTS.filter(s=>s.need>0).map(s => { const n = photoIds(c,s.key).length; return {ok: n >= s.need, text: `${s.name}: ${n}/${s.need}${s.key==="item"?"+":""}`}; });
-  return {items, hard: photoIds(c,"slip").length >= 1 && photoIds(c,"item").length >= 1 && !pend, all: items.every(i=>i.ok) && !pend, pend};
+  return {n: allPhotos(c).length, pend};
 }
 
 function renderEditor(){
@@ -272,35 +271,35 @@ function renderEditor(){
   const v = $("#view");
   if (!c) { v.innerHTML = `<div class="empty"><strong>That return was deleted.</strong></div>`; setFab(`<button type="button" id="backBtn">← All returns</button>`); return; }
   const st = c.status || "draft";
-  const editable = st === "draft" || st === "needs_you";
+  const editable = EDITABLE.includes(st);
   const ld = localDraft[c.id] || {};
-  const val = k => esc(ld[k] ?? c[k] ?? "");
   let h = `<div class="bar"><button type="button" class="ghost" id="backBtn">← All returns</button><span class="grow"></span><span class="pill ${STATUS[st][1]}">${STATUS[st][0]}</span></div>`;
   h += statusNotice(c);
-  h += `<section class="card" aria-label="Account and reason">
-    <span class="eyebrow">Seller account</span>
-    <div class="seg" role="group" aria-label="Seller account">${ACCOUNTS.map(([k,l]) => `<button type="button" data-acct="${k}" aria-pressed="${c.account===k}" ${editable?"":"disabled"}>${l}</button>`).join("")}</div>
-    <span class="eyebrow">What came back</span>
-    <div class="chips" role="group" aria-label="Reason">${REASONS.map(([k,l]) => `<button type="button" data-reason="${k}" aria-pressed="${c.reason===k}" ${editable?"":"disabled"}>${l}</button>`).join("")}</div>
-  </section>`;
-  h += `<section class="card" aria-label="Photos">` + SLOTS.map(s => slotHtml(c, s, editable)).join("") + `</section>`;
-  h += `<section class="card" aria-label="Details">
-    <label class="f" for="f-lpn">LPN (optional, Claude reads it off the sticker)<input type="text" id="f-lpn" class="mono" data-field="lpn" value="${val("lpn")}" placeholder="LPNRR…" autocomplete="off" autocapitalize="characters" ${editable?"":"readonly"}></label>
-    <label class="f" for="f-order">Order ID (optional)<input type="text" id="f-order" class="mono" data-field="order_id" value="${val("order_id")}" placeholder="111-1234567-1234567" autocomplete="off" ${editable?"":"readonly"}></label>
-    <label class="f" for="f-notes">Notes for Claude<textarea id="f-notes" data-field="notes" placeholder="e.g. Ours is the green kit; they sent back an old grey one with no polish." ${editable?"":"readonly"}>${val("notes")}</textarea></label>
-  </section>`;
-  if (st === "draft") {
-    h += `<section class="card"><div class="checklist">` + readiness(c).items.map(i => `<span class="${i.ok?"ok":"no"}">${i.ok?"✓":"○"} ${esc(i.text)}</span>`).join("") + `</div>
-      <div class="confirm">${confirmDelete
-        ? `<span class="small">Delete this draft and its photos?</span><button type="button" class="danger" id="delYes">Delete</button><button type="button" id="delNo">Keep</button>`
-        : `<button type="button" class="ghost danger" id="delBtn">Delete draft</button>`}</div></section>`;
-  }
+  h += `<section class="card" aria-label="Photos">${photosHtml(c, editable)}</section>`;
+  if (editable) h += `<section class="card"><label class="f" for="f-notes">Note for Claude (optional)<textarea id="f-notes" data-field="notes" placeholder="Anything the photos don't show.">${esc(ld.notes ?? c.notes ?? "")}</textarea></label>
+      ${st === "draft" ? `<div class="confirm">${confirmDelete
+        ? `<span class="small">Delete this return and its photos?</span><button type="button" class="danger" id="delYes">Delete</button><button type="button" id="delNo">Keep</button>`
+        : `<button type="button" class="ghost danger" id="delBtn">Delete</button>`}</div>` : ""}</section>`;
+  else if (c.notes) h += `<section class="card"><span class="eyebrow">Your note</span><span>${esc(c.notes)}</span></section>`;
   v.innerHTML = h;
   const r = readiness(c);
-  if (st === "draft") setFab(`<button type="button" class="primary" id="sendBtn" ${r.hard && c.account ? "" : "disabled"}>${!c.account ? "Pick an account first" : r.pend ? "Uploading…" : r.all ? "Send to Claude" : "Send with fewer photos"}</button>`);
+  if (st === "draft") setFab(`<button type="button" class="primary" id="sendBtn" ${r.n && !r.pend ? "" : "disabled"}>${r.pend ? "Uploading…" : r.n ? "Send to Claude" : "Add photos first"}</button>`);
   else if (st === "needs_you") setFab(`<button type="button" class="primary" id="replyBtn">Send answer to Claude</button>`);
   else setFab("");
   hydrateImages();
+}
+
+function photosHtml(c, editable){
+  const ph = allPhotos(c);
+  const pend = Object.values(pending[c.id]||{}).flat();
+  const thumbs = ph.map((p, i) => `<div class="ph"><img data-fid="${esc(p.fid)}" alt="Photo ${i+1}">${editable?`<button type="button" class="x" aria-label="Remove photo" data-rm="${p.slot}:${esc(p.fid)}">×</button>`:""}</div>`).join("")
+    + pend.map(x => `<div class="ph"><img src="${x.url}" alt="">${x.state==="up"?`<span class="busy">Uploading</span>`:x.state==="err"?`<span class="err">${esc(x.err)}</span>`:""}</div>`).join("");
+  const add = editable ? `<div class="add">
+      <label for="cam">📷 Take photo<input type="file" id="cam" accept="image/*" capture="environment" data-slot="photos"></label>
+      <label class="lib" for="lib">Library<input type="file" id="lib" accept="image/*" multiple data-slot="photos"></label></div>` : "";
+  return `<div class="slot-head"><span class="name">Photos</span><span class="count">${ph.length}</span></div>
+    ${editable ? `<span class="hint">Return slip, LPN sticker, the item from a few sides, and anything wrong with it. Any order.</span>` : ""}
+    ${(ph.length||pend.length)?`<div class="grid">${thumbs}</div>`:""}${add}`;
 }
 
 function statusNotice(c){
@@ -310,15 +309,19 @@ function statusNotice(c){
   if (c.amount) kv.push(["Claimed", `$${esc(c.amount)}`]);
   if (c.recovered_amount) kv.push(["Reimbursed", `$${esc(c.recovered_amount)}`]);
   if (c.filed_at) kv.push(["Filed", fmtDate(c.filed_at)]);
-  if (c.order_id && st !== "draft") kv.push(["Order", `<span class="mono">${esc(c.order_id)}</span>`]);
+  if (c.account) kv.push(["Account", esc(label(ACCOUNTS, c.account))]);
+  if (c.reason) kv.push(["Reason", esc(label(REASONS, c.reason))]);
+  if (c.product_name) kv.push(["Item", esc(c.product_name)]);
+  if (c.order_id) kv.push(["Order", `<span class="mono">${esc(c.order_id)}</span>`]);
+  if (c.lpn) kv.push(["LPN", `<span class="mono">${esc(c.lpn)}</span>`]);
   const kvHtml = kv.length ? `<dl class="kv">${kv.map(([a,b])=>`<dt>${a}</dt><dd>${b}</dd>`).join("")}</dl>` : "";
   const note = c.claude_note ? `<span>${esc(c.claude_note)}</span>` : "";
-  if (st === "ready") return `<div class="notice info"><strong>Sent to Claude.</strong><span>Next time you ask Claude to file returns, it picks this up, fills the claim in Seller Central and asks you before submitting.</span></div>`;
+  if (st === "ready") return `<div class="notice info"><strong>Sent to Claude.</strong><span>Claude picks this up on its next check (9 am and 3 pm), fills the claim and asks you here before submitting. You can still add photos or a note until then.</span>${kvHtml}</div>`;
   if (st === "filing") return `<div class="notice info"><strong>Claude is filing this claim.</strong>${note}</div>`;
   if (st === "filed") return `<div class="notice info"><strong>Filed. Waiting on Amazon.</strong>${note}${kvHtml}</div>`;
   if (st === "won") return `<div class="notice good"><strong>Reimbursed.</strong>${note}${kvHtml}</div>`;
   if (st === "lost") return `<div class="notice bad"><strong>Denied.</strong>${note}${kvHtml}</div>`;
-  if (st === "needs_you") return `<div class="notice warn"><strong>Claude needs something from you.</strong><span>${esc(c.question || "See the note and add photos or details.")}</span>
+  if (st === "needs_you") return `<div class="notice warn"><strong>Claude needs something from you.</strong><span style="white-space:pre-wrap">${esc(c.question || "See the note and add photos or details.")}</span>${kvHtml}
     <label class="f" for="f-reply">Your answer<textarea id="f-reply" data-field="reply" placeholder="Type your answer, or add the photos it asked for below.">${esc((localDraft[c.id]||{}).reply ?? c.reply ?? "")}</textarea></label></div>`;
   return "";
 }
@@ -341,11 +344,12 @@ function slotHtml(c, s, editable){
 function newId(){ const d=new Date(), p=n=>String(n).padStart(2,"0"); return `r-${String(d.getFullYear()).slice(2)}${p(d.getMonth()+1)}${p(d.getDate())}-${Math.random().toString(36).slice(2,6)}`; }
 function fail(e, what){ if (e && e.message === "reauth") return; console.error(e); toast(`${what}: ${e && e.message ? e.message : "check your connection"}`); }
 
-async function createClaim(){
+async function createClaim(files){
   const t = nowIso();
-  const o = {id:newId(), created_at:t, updated_at:t, status:"draft", account: ls.get("rd-acct") || "", reason:"switcheroo"};
-  try { setFab(`<button type="button" class="primary" disabled>Creating…</button>`); await appendClaim(o); openId = o.id; render(); scrollTo(0,0); }
-  catch(e){ fail(e, "Couldn't create the return"); render(); }
+  const o = {id:newId(), created_at:t, updated_at:t, status:"draft"};
+  try { setFab(`<button type="button" class="primary" disabled>Starting…</button>`); await appendClaim(o); openId = o.id; render(); scrollTo(0,0); }
+  catch(e){ fail(e, "Couldn't create the return"); render(); return; }
+  if (files && files.length) addPhotos("photos", files);
 }
 
 async function addPhotos(slot, files){
@@ -360,7 +364,7 @@ async function addPhotos(slot, files){
       const fid = await uploadPhoto(claimById(id), slot, blob);
       thumbCache.set(fid, Promise.resolve(it.url));
       const fresh = claimById(id);
-      await patchClaim(id, {[slot + "_photos"]: photoIds(fresh, slot).concat(fid).join(",")});
+      await patchClaim(id, {[colOf(slot)]: photoIds(fresh, slot).concat(fid).join(",")});
       pending[id][slot] = pending[id][slot].filter(x => x !== it);
     } catch (e) {
       if (e && e.message === "reauth") return;
@@ -374,7 +378,7 @@ async function addPhotos(slot, files){
 async function removePhoto(slot, fid){
   const c = claimById(openId); if (!c) return;
   try {
-    await patchClaim(c.id, {[slot + "_photos"]: photoIds(c, slot).filter(x => x !== fid).join(",")});
+    await patchClaim(c.id, {[colOf(slot)]: photoIds(c, slot).filter(x => x !== fid).join(",")});
     render();
     try { await jpost(`${DRIVE}/files/${fid}`, {trashed:true}, "PATCH"); } catch {}
   } catch(e){ fail(e, "Couldn't remove the photo"); }
@@ -382,7 +386,7 @@ async function removePhoto(slot, fid){
 
 function takeDraft(id){
   const ld = localDraft[id] || {}; const out = {};
-  ["lpn","order_id","notes"].forEach(k => { if (ld[k] !== undefined) out[k] = ld[k].trim(); });
+  ["notes"].forEach(k => { if (ld[k] !== undefined) out[k] = ld[k].trim(); });
   return out;
 }
 async function flushField(el){
@@ -431,10 +435,7 @@ document.addEventListener("click", e => {
   if (t.id === "retryBtn") { loadError = null; render(); refresh(); return; }
   if (t.dataset.tab) { tab = t.dataset.tab; render(); return; }
   if (t.dataset.open) { openId = t.dataset.open; confirmDelete = false; render(); scrollTo(0,0); return; }
-  if (t.id === "newBtn") { createClaim(); return; }
   if (t.id === "backBtn") { const a = document.activeElement; if (a && a.dataset && a.dataset.field) flushField(a); openId = null; render(); return; }
-  if (t.dataset.acct) { ls.set("rd-acct", t.dataset.acct); patchClaim(openId, {account: t.dataset.acct}).then(render, e2 => fail(e2, "Couldn't save")); return; }
-  if (t.dataset.reason) { patchClaim(openId, {reason: t.dataset.reason}).then(render, e2 => fail(e2, "Couldn't save")); return; }
   if (t.dataset.rm) { const i = t.dataset.rm.indexOf(":"); removePhoto(t.dataset.rm.slice(0,i), t.dataset.rm.slice(i+1)); return; }
   if (t.id === "sendBtn") { send(); return; }
   if (t.id === "replyBtn") { sendReply(); return; }
@@ -444,6 +445,7 @@ document.addEventListener("click", e => {
 });
 document.addEventListener("change", e => {
   const el = e.target;
+  if (el.type === "file" && el.dataset.new) { const files = [...el.files]; el.value = ""; if (files.length) createClaim(files); return; }
   if (el.type === "file" && el.dataset.slot) { const files = [...el.files]; el.value = ""; addPhotos(el.dataset.slot, files); }
 });
 document.addEventListener("input", e => {

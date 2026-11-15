@@ -98,3 +98,7 @@ img{max-width:100%}
 .signin{display:flex;flex-direction:column;gap:12px}
 .signin .primary{min-height:52px;font-size:16px}
 .linkish{background:none;border:0;color:var(--accent);padding:0;min-height:auto;text-decoration:underline;cursor:pointer}
+/* one-tap capture */
+.fab .bigbtn{flex:1;display:flex;align-items:center;justify-content:center;gap:8px;min-height:56px;border-radius:12px;font-size:17px;font-weight:600;cursor:pointer;border:1px solid var(--line);background:var(--surface);color:var(--ink)}
+.fab .bigbtn.primary{flex:2.2;background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+.fab input[type=file]{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none}
