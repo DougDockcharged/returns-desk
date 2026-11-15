@@ -316,7 +316,7 @@ function statusNotice(c){
   if (c.lpn) kv.push(["LPN", `<span class="mono">${esc(c.lpn)}</span>`]);
   const kvHtml = kv.length ? `<dl class="kv">${kv.map(([a,b])=>`<dt>${a}</dt><dd>${b}</dd>`).join("")}</dl>` : "";
   const note = c.claude_note ? `<span>${esc(c.claude_note)}</span>` : "";
-  if (st === "ready") return `<div class="notice info"><strong>Sent to Claude.</strong><span>Claude picks this up on its next check (9 am and 3 pm), fills the claim and asks you here before submitting. You can still add photos or a note until then.</span>${kvHtml}</div>`;
+  if (st === "ready") return `<div class="notice info"><strong>Sent to Claude.</strong><span>Claude picks this up on its next check (9 am and 3 pm), files the claim with Amazon and shows the case ID here. You can still add photos or a note until then.</span>${kvHtml}</div>`;
   if (st === "filing") return `<div class="notice info"><strong>Claude is filing this claim.</strong>${note}</div>`;
   if (st === "filed") return `<div class="notice info"><strong>Filed. Waiting on Amazon.</strong>${note}${kvHtml}</div>`;
   if (st === "won") return `<div class="notice good"><strong>Reimbursed.</strong>${note}${kvHtml}</div>`;
