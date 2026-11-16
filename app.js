@@ -17,7 +17,6 @@ const COLS = ["id","created_at","updated_at","status","account","reason","order_
   "shipment_id","asin","sku","product_name","amount","claim_type","case_id","filed_at",
   "claude_note","question","reply","recovered_amount","closed_at","sent_at","replied_at","photos"];
 const TAB = "Returns";
-const LASTCOL = colLetter(COLS.length);
 
 const $ = (s, el=document) => el.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -31,86 +30,39 @@ const ls = {
 function colLetter(n){ let s=""; while(n>0){ const m=(n-1)%26; s=String.fromCharCode(65+m)+s; n=Math.floor((n-1)/26); } return s; }
 function toast(msg){ const t=$("#toast"); t.textContent=msg; t.hidden=false; clearTimeout(toast._t); toast._t=setTimeout(()=>t.hidden=true,2800); }
 
-// ---------------- auth (OAuth implicit redirect; works inside a home-screen app) ----------------
-let token = null;
-function redirectUri(){ return location.origin + location.pathname; }
-function readHashToken(){
-  if (!location.hash || location.hash.length < 2) return null;
-  const p = new URLSearchParams(location.hash.slice(1));
-  if (!p.get("access_token") && !p.get("error")) return null;
-  history.replaceState(null, "", location.pathname + location.search);
-  if (p.get("state") !== ls.get("rd-state")) return {error:"state_mismatch"};
-  if (p.get("error")) return {error: p.get("error")};
-  return {token: p.get("access_token"), exp: Date.now() + (Number(p.get("expires_in")||3600) - 120) * 1000};
-}
-function signIn(prompt){
-  if (!CFG.clientId || CFG.clientId.includes("REPLACE")) { alert("Returns Desk is almost ready: its Google sign-in key isn't set up yet. Ask Claude to finish setup."); return; }
-  const state = Math.random().toString(36).slice(2);
-  ls.set("rd-state", state);
-  const q = new URLSearchParams({client_id: CFG.clientId, redirect_uri: redirectUri(), response_type: "token",
-    scope: CFG.scopes, include_granted_scopes: "true", state, hd: CFG.hostedDomain});
-  if (prompt) q.set("prompt", prompt);
-  location.assign("https://accounts.google.com/o/oauth2/v2/auth?" + q);
-}
-function signOut(){ ls.set("rd-token", null); ls.set("rd-signed", null); token = null; render(); }
-function loadToken(){
-  const h = readHashToken();
-  if (h && h.token) { ls.set("rd-token", JSON.stringify(h)); ls.set("rd-signed","1"); return {ok:true}; }
-  if (h && h.error) return {error:h.error};
-  try { const t = JSON.parse(ls.get("rd-token") || "null"); if (t && t.exp > Date.now()) return {ok:true, t}; } catch {}
-  return {expired: !!ls.get("rd-signed")};
-}
-function currentToken(){ try { const t = JSON.parse(ls.get("rd-token")||"null"); return t && t.exp > Date.now() ? t.token : null; } catch { return null; } }
+// ---------------- auth (access code; the backend runs as Doug, so phones never sign in to Google) ----------------
+function currentCode(){ return ls.get("rd-code"); }
+function signOut(){ ls.set("rd-code", null); ls.set("rd-name", null); claims = []; loaded = false; thumbCache.clear(); render(); }
+function needSignIn(msg){ ls.set("rd-code", null); render.authError = msg || ""; loaded = false; render(); }
 
-async function api(url, opts={}){
-  const t = currentToken();
-  if (!t) { signIn(); throw new Error("reauth"); }
-  const r = await fetch(url, {...opts, headers: {...(opts.headers||{}), Authorization: "Bearer " + t}});
-  if (r.status === 401) { ls.set("rd-token", null); signIn(); throw new Error("reauth"); }
-  if (!r.ok) { let m = ""; try { m = (await r.json()).error.message; } catch {} const e = new Error(m || ("HTTP " + r.status)); e.status = r.status; throw e; }
-  const ct = r.headers.get("content-type") || "";
-  return ct.includes("json") ? r.json() : r;
+async function call(action, body={}, code=currentCode()){
+  if (!code) { needSignIn(); throw new Error("reauth"); }
+  let r;
+  try { r = await fetch(CFG.backendUrl, {method:"POST", body: JSON.stringify({...body, action, code})}); }
+  catch { throw new Error("No connection. Check your signal and try again."); }
+  let j; try { j = await r.json(); } catch { throw new Error("The Returns Desk server didn't answer (HTTP " + r.status + ")."); }
+  if (!j.ok && j.auth) { needSignIn(j.error); throw new Error("reauth"); }
+  if (!j.ok) throw new Error(j.error || "Something went wrong");
+  return j;
 }
-const DRIVE = "https://www.googleapis.com/drive/v3";
-const SHEETS = "https://sheets.googleapis.com/v4/spreadsheets";
-const jpost = (url, body, method="POST") => api(url, {method, headers:{"Content-Type":"application/json"}, body: JSON.stringify(body)});
-
-// ---------------- storage: Drive folder + Google Sheet ----------------
-let folderId = ls.get("rd-folder"), sheetId = ls.get("rd-sheet");
-async function findOne(q){ const r = await api(`${DRIVE}/files?q=${encodeURIComponent(q)}&fields=files(id,name)&spaces=drive&pageSize=5`); return r.files && r.files[0] ? r.files[0].id : null; }
-async function ensureStore(){
-  if (folderId && sheetId) return;
-  folderId = await findOne(`name='${CFG.folderName}' and mimeType='application/vnd.google-apps.folder' and trashed=false`);
-  if (!folderId) folderId = (await jpost(`${DRIVE}/files?fields=id`, {name: CFG.folderName, mimeType:"application/vnd.google-apps.folder"})).id;
-  sheetId = await findOne(`name='${CFG.sheetName}' and mimeType='application/vnd.google-apps.spreadsheet' and '${folderId}' in parents and trashed=false`);
-  if (!sheetId) {
-    const s = await jpost(SHEETS, {properties:{title: CFG.sheetName}, sheets:[{properties:{title: TAB, sheetId: 0, gridProperties:{frozenRowCount:1}}}]});
-    sheetId = s.spreadsheetId;
-    const meta = await api(`${DRIVE}/files/${sheetId}?fields=parents`);
-    await api(`${DRIVE}/files/${sheetId}?addParents=${folderId}&removeParents=${(meta.parents||[]).join(",")}&fields=id`, {method:"PATCH"});
-    await jpost(`${SHEETS}/${sheetId}/values/${TAB}!A1:${LASTCOL}1?valueInputOption=RAW`, {values:[COLS]}, "PUT");
+async function signIn(code){
+  const c = String(code || "").trim();
+  if (!c) { render.authError = "Type the access code first."; render(); return; }
+  render.signingIn = true; render.authError = ""; render();
+  try {
+    const j = await call("whoami", {}, c);
+    ls.set("rd-code", c); ls.set("rd-name", j.name);
+    render.signingIn = false; render(); refresh();
+  } catch(e) {
+    render.signingIn = false;
+    if (e.message !== "reauth") render.authError = e.message;
+    render();
   }
-  ls.set("rd-folder", folderId); ls.set("rd-sheet", sheetId);
 }
 
-let header = COLS.slice();
-async function fetchRows(){
-  const r = await api(`${SHEETS}/${sheetId}/values/${TAB}!A1:${colLetter(Math.max(COLS.length, 40))}`);
-  const vals = r.values || [];
-  header = (vals[0] && vals[0].length) ? vals[0] : COLS.slice();
-  // Add any column the sheet is missing (app updated after the sheet was made).
-  const missing = COLS.filter(c => !header.includes(c));
-  if (missing.length) {
-    header = header.concat(missing);
-    await jpost(`${SHEETS}/${sheetId}/values/${TAB}!A1:${colLetter(header.length)}1?valueInputOption=RAW`, {values:[header]}, "PUT");
-  }
-  return vals.slice(1).map((row, i) => {
-    const o = {_row: i + 2};
-    header.forEach((h, j) => o[h] = row[j] == null ? "" : String(row[j]));
-    return o;
-  }).filter(o => o.id);
-}
-function toRow(o){ return header.map(h => o[h] == null ? "" : String(o[h])); }
+// ---------------- storage: the backend reads/writes the Returns Desk sheet + Drive folder ----------------
+let sheetUrl = "";
+function mergeRow(row){ if (!row) return; const i = claims.findIndex(c => c.id === row.id); if (i >= 0) claims[i] = row; else claims.push(row); }
 const colOf = slot => slot === "photos" ? "photos" : slot + "_photos";
 function photoIds(c, slot){ return String(c[colOf(slot)] || "").split(",").map(s => s.trim()).filter(Boolean); }
 function allPhotos(c){ return SLOT_KEYS.flatMap(k => photoIds(c, k).map(fid => ({slot:k, fid}))); }
@@ -119,42 +71,30 @@ const EDITABLE = ["draft","ready","needs_you"];
 let chain = Promise.resolve();
 function serial(fn){ const p = chain.catch(()=>{}).then(fn); chain = p; return p; }
 
-async function patchClaim(id, data){
-  return serial(async () => {
-    const rows = await fetchRows();
-    const c = rows.find(r => r.id === id);
-    if (!c) throw new Error("This return no longer exists in the sheet.");
-    const next = {...c, ...data, updated_at: nowIso()};
-    await jpost(`${SHEETS}/${sheetId}/values/${TAB}!A${c._row}:${colLetter(header.length)}${c._row}?valueInputOption=RAW`, {values:[toRow(next)]}, "PUT");
-    claims = rows.map(r => r.id === id ? next : r);
-    return next;
-  });
-}
-async function appendClaim(o){
-  return serial(async () => {
-    await fetchRows();
-    await jpost(`${SHEETS}/${sheetId}/values/${TAB}!A1:${colLetter(header.length)}1:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`, {values:[toRow(o)]});
-    claims = await fetchRows();
-  });
-}
-async function deleteClaimRow(id){
-  return serial(async () => {
-    const rows = await fetchRows();
-    const c = rows.find(r => r.id === id); if (!c) return;
-    await jpost(`${SHEETS}/${sheetId}:batchUpdate`, {requests:[{deleteDimension:{range:{sheetId:0, dimension:"ROWS", startIndex:c._row-1, endIndex:c._row}}}]});
-    if (c.drive_folder) { try { await jpost(`${DRIVE}/files/${c.drive_folder}`, {trashed:true}, "PATCH"); } catch {} }
-    claims = await fetchRows();
-  });
-}
+async function fetchRows(){ const j = await call("list"); sheetUrl = j.sheetUrl || ""; return j.rows || []; }
+async function patchClaim(id, data){ return serial(async () => { const j = await call("patch", {id, data}); mergeRow(j.row); return j.row; }); }
+async function createRow(data){ return serial(async () => { const j = await call("create", {data}); mergeRow(j.row); return j.row; }); }
+async function deleteClaimRow(id){ return serial(async () => { await call("remove", {id}); claims = claims.filter(c => c.id !== id); }); }
 
 // ---------------- photos ----------------
-const thumbCache = new Map();
-async function photoUrl(fid){
+const thumbCache = new Map();   // fid -> Promise<url>
+let wanted = new Set(), wantTimer = null;
+function photoUrl(fid){
   if (thumbCache.has(fid)) return thumbCache.get(fid);
-  const p = (async () => { const r = await api(`${DRIVE}/files/${fid}?alt=media`); return URL.createObjectURL(await r.blob()); })();
-  thumbCache.set(fid, p);
-  p.catch(() => thumbCache.delete(fid));
+  let res, rej; const p = new Promise((a, b) => { res = a; rej = b; }); p._res = res; p._rej = rej;
+  thumbCache.set(fid, p); wanted.add(fid);
+  clearTimeout(wantTimer); wantTimer = setTimeout(flushWanted, 30);
   return p;
+}
+async function flushWanted(){
+  const fids = [...wanted]; wanted = new Set();
+  for (let i = 0; i < fids.length; i += 12) {
+    const part = fids.slice(i, i + 12);
+    try {
+      const j = await call("photos", {fids: part});
+      part.forEach(f => { const p = thumbCache.get(f); const u = (j.photos || {})[f]; if (!p || !p._res) return; if (u) p._res(u); else { thumbCache.delete(f); p._rej(new Error("missing")); } });
+    } catch(e) { part.forEach(f => { const p = thumbCache.get(f); if (p && p._rej) { thumbCache.delete(f); p._rej(e); } }); }
+  }
 }
 function hydrateImages(){
   document.querySelectorAll("img[data-fid]:not([src])").forEach(img => {
@@ -162,7 +102,7 @@ function hydrateImages(){
   });
 }
 async function toJpeg(file){
-  const MAX = 2000;
+  const MAX = 1800;
   let src;
   try { src = await createImageBitmap(file, {imageOrientation:"from-image"}); }
   catch { src = await new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = () => rej(new Error("decode")); im.src = URL.createObjectURL(file); }); }
@@ -170,30 +110,12 @@ async function toJpeg(file){
   const k = Math.min(1, MAX / Math.max(w, h));
   const cv = document.createElement("canvas"); cv.width = Math.round(w*k); cv.height = Math.round(h*k);
   cv.getContext("2d").drawImage(src, 0, 0, cv.width, cv.height);
-  return new Promise((res, rej) => cv.toBlob(b => b ? res(b) : rej(new Error("encode")), "image/jpeg", 0.86));
+  return new Promise((res, rej) => cv.toBlob(b => b ? res(b) : rej(new Error("encode")), "image/jpeg", 0.85));
 }
-const folderJobs = new Map();
-function claimFolder(c){
-  if (c.drive_folder) return Promise.resolve(c.drive_folder);
-  if (!folderJobs.has(c.id)) {
-    const job = (async () => {
-      const f = await jpost(`${DRIVE}/files?fields=id`, {name: c.id, mimeType:"application/vnd.google-apps.folder", parents:[folderId]});
-      await patchClaim(c.id, {drive_folder: f.id});
-      return f.id;
-    })();
-    job.catch(() => folderJobs.delete(c.id));
-    folderJobs.set(c.id, job);
-  }
-  return folderJobs.get(c.id);
-}
-async function uploadPhoto(c, slot, blob){
-  const folder = await claimFolder(c);
-  const name = `${slot}-${new Date().toISOString().replace(/[:.]/g,"").slice(0,15)}-${Math.random().toString(36).slice(2,5)}.jpg`;
-  const boundary = "rd" + Math.random().toString(36).slice(2);
-  const meta = JSON.stringify({name, parents:[folder], mimeType:"image/jpeg"});
-  const body = new Blob([`--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${meta}\r\n--${boundary}\r\nContent-Type: image/jpeg\r\n\r\n`, blob, `\r\n--${boundary}--`]);
-  const r = await api(`https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id`, {method:"POST", headers:{"Content-Type":`multipart/related; boundary=${boundary}`}, body});
-  return r.id;
+function b64(blob){ return new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(",")[1]); r.onerror = rej; r.readAsDataURL(blob); }); }
+async function uploadPhoto(id, slot, blob){
+  const data = await b64(blob);
+  return serial(async () => { const j = await call("upload", {id, slot, data}); mergeRow(j.row); return j.fid; });
 }
 
 // ---------------- state + rendering ----------------
@@ -220,12 +142,13 @@ function setFab(html){ const f=$("#fab"); if(!html){f.hidden=true;return;} $("#f
 function render(){
   const v = $("#view");
   const acct = $("#acctBtn");
-  if (!currentToken()) {
+  if (!currentCode()) {
     acct.hidden = true; setFab("");
-    v.innerHTML = `<div class="card signin"><h2>Sign in</h2>
-      <p class="muted">Use your dockcharged.com Google account. Photos are saved to a <b>Returns Desk</b> folder in your Google Drive and each return becomes a row in the <b>Returns Desk</b> sheet, where Claude picks it up.</p>
-      ${render.authError ? `<div class="notice bad small">Sign-in didn't finish (${esc(render.authError)}). Try again.</div>` : ""}
-      <button type="button" class="primary" id="signInBtn">Sign in with Google</button></div>`;
+    v.innerHTML = `<form class="card signin" id="signInForm"><h2>Sign in</h2>
+      <p class="muted">Type the access code Doug gave you. You only do this once on this phone.</p>
+      <label class="f" for="f-code">Access code<input type="text" id="f-code" class="mono" placeholder="XXXX-XXXX-XXXX" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" ${render.signingIn ? "disabled" : ""}></label>
+      ${render.authError ? `<div class="notice bad small">${esc(render.authError)}</div>` : ""}
+      <button type="submit" class="primary" id="signInBtn" ${render.signingIn ? "disabled" : ""}>${render.signingIn ? "Checking…" : "Sign in"}</button></form>`;
     return;
   }
   acct.hidden = false; acct.textContent = "Sign out"; acct.id = "acctBtn";
@@ -236,11 +159,11 @@ function render(){
   let h = `<nav class="tabs" aria-label="Filter returns">` + TABS.map(([k,l]) =>
     `<button type="button" data-tab="${k}" aria-pressed="${tab===k}">${l}${k==="needs_you"&&nNeed?` · ${nNeed}`:""}</button>`).join("") + `</nav>`;
   if (loadError) h += `<div class="notice bad"><strong>Couldn't load your returns.</strong><span class="small">${esc(loadError)}</span><button type="button" id="retryBtn">Try again</button></div>`;
-  else if (!loaded) h += `<div class="empty"><strong>Loading your returns…</strong><span class="muted small">First time, this also creates the Returns Desk folder and sheet in your Drive.</span></div>`;
+  else if (!loaded) h += `<div class="empty"><strong>Loading your returns…</strong></div>`;
   else if (!claims.length) h += `<div class="empty"><strong>No returns logged yet.</strong><span class="muted small">Tap <b>New return</b> and shoot the slip, the LPN sticker and the item. Then tap <b>Send to Claude</b>. Claude works out the account, order, LPN and reason from the photos and files the claim.</span></div>`;
   else if (!rows.length) h += `<div class="empty"><span class="muted">Nothing here.</span></div>`;
   else h += `<div class="list">` + rows.map(rowHtml).join("") + `</div>`;
-  if (loaded && sheetId) h += `<p class="small muted">Records: <a href="https://docs.google.com/spreadsheets/d/${esc(sheetId)}" target="_blank" rel="noopener">Returns Desk sheet</a></p>`;
+  if (loaded && sheetUrl) h += `<p class="small muted">Signed in as ${esc(ls.get("rd-name") || "")} · <a href="${esc(sheetUrl)}" target="_blank" rel="noopener">Returns Desk sheet</a></p>`;
   v.innerHTML = h;
   setFab(loaded ? `<label class="primary bigbtn" for="newCam">📷 New return<input type="file" id="newCam" accept="image/*" capture="environment" data-new="1"></label><label class="bigbtn lib" for="newLib">Library<input type="file" id="newLib" accept="image/*" multiple data-new="1"></label>` : "");
   hydrateImages();
@@ -347,9 +270,7 @@ function newId(){ const d=new Date(), p=n=>String(n).padStart(2,"0"); return `r-
 function fail(e, what){ if (e && e.message === "reauth") return; console.error(e); toast(`${what}: ${e && e.message ? e.message : "check your connection"}`); }
 
 async function createClaim(files){
-  const t = nowIso();
-  const o = {id:newId(), created_at:t, updated_at:t, status:"draft"};
-  try { setFab(`<button type="button" class="primary" disabled>Starting…</button>`); await appendClaim(o); openId = o.id; render(); scrollTo(0,0); }
+  try { setFab(`<button type="button" class="primary" disabled>Starting…</button>`); const o = await createRow({}); openId = o.id; render(); scrollTo(0,0); }
   catch(e){ fail(e, "Couldn't create the return"); render(); return; }
   if (files && files.length) addPhotos("photos", files);
 }
@@ -363,10 +284,8 @@ async function addPhotos(slot, files){
     try {
       let blob;
       try { blob = await toJpeg(it.f); } catch { if (/^image\/(jpeg|png|webp)$/.test(it.f.type)) blob = it.f; else throw new Error("format"); }
-      const fid = await uploadPhoto(claimById(id), slot, blob);
+      const fid = await uploadPhoto(id, slot, blob);
       thumbCache.set(fid, Promise.resolve(it.url));
-      const fresh = claimById(id);
-      await patchClaim(id, {[colOf(slot)]: photoIds(fresh, slot).concat(fid).join(",")});
       pending[id][slot] = pending[id][slot].filter(x => x !== it);
     } catch (e) {
       if (e && e.message === "reauth") return;
@@ -380,9 +299,9 @@ async function addPhotos(slot, files){
 async function removePhoto(slot, fid){
   const c = claimById(openId); if (!c) return;
   try {
-    await patchClaim(c.id, {[colOf(slot)]: photoIds(c, slot).filter(x => x !== fid).join(",")});
+    await serial(async () => { const j = await call("removePhoto", {id: c.id, slot, fid}); mergeRow(j.row); });
+    thumbCache.delete(fid);
     render();
-    try { await jpost(`${DRIVE}/files/${fid}`, {trashed:true}, "PATCH"); } catch {}
   } catch(e){ fail(e, "Couldn't remove the photo"); }
 }
 
@@ -414,11 +333,10 @@ async function deleteDraft(){
 }
 
 async function refresh(){
-  if (!currentToken()) return;
-  try { await ensureStore(); claims = await serial(fetchRows); loaded = true; loadError = null; }
+  if (!currentCode()) return;
+  try { claims = await serial(fetchRows); loaded = true; loadError = null; }
   catch(e){
     if (e && e.message === "reauth") return;
-    if (e && e.status === 404) { ls.set("rd-folder", null); ls.set("rd-sheet", null); folderId = sheetId = null; }
     loadError = e && e.message || "Unknown error";
   }
   safeRender();
@@ -432,7 +350,6 @@ function safeRender(){
 // ---------------- events ----------------
 document.addEventListener("click", e => {
   const t = e.target.closest("button"); if (!t) return;
-  if (t.id === "signInBtn") { signIn("select_account"); return; }
   if (t.id === "acctBtn") { signOut(); return; }
   if (t.id === "retryBtn") { loadError = null; render(); refresh(); return; }
   if (t.dataset.tab) { tab = t.dataset.tab; render(); return; }
@@ -444,6 +361,9 @@ document.addEventListener("click", e => {
   if (t.id === "delBtn") { confirmDelete = true; render(); return; }
   if (t.id === "delNo") { confirmDelete = false; render(); return; }
   if (t.id === "delYes") { deleteDraft(); return; }
+});
+document.addEventListener("submit", e => {
+  if (e.target.id === "signInForm") { e.preventDefault(); const f = $("#f-code"); if (f) f.blur(); signIn(f ? f.value : ""); }
 });
 document.addEventListener("change", e => {
   const el = e.target;
@@ -475,8 +395,8 @@ if ("serviceWorker" in navigator) {
     reg.update().catch(() => {});
   }).catch(() => {});
 }
-const auth = loadToken();
-if (auth.error) render.authError = auth.error;
-if (!auth.ok && auth.expired && !auth.error) { signIn(); }
-else { render(); refresh(); }
+// Old Google sign-in left a token in the URL hash or storage: clear it.
+if (location.hash.includes("access_token") || location.hash.includes("error=")) history.replaceState(null, "", location.pathname + location.search);
+["rd-token","rd-signed","rd-state","rd-folder","rd-sheet"].forEach(k => ls.set(k, null));
+render(); refresh();
 })();

@@ -1,9 +1,5 @@
-// Google OAuth client (Web application) for this app. Public by design.
-// Authorized JavaScript origin + redirect URI must include the GitHub Pages URL.
+// Returns Desk backend: Google Apps Script web app (backend/Code.gs in return-claims), runs as Doug.
+// Phones sign in with an access code from the Users tab of the Returns Desk sheet.
 window.RD_CONFIG = {
-  clientId: "615531621085-mvungcmja3nhb9m835uq5i65qb46fti6.apps.googleusercontent.com",
-  hostedDomain: "dockcharged.com",
-  scopes: "https://www.googleapis.com/auth/drive.file",
-  folderName: "Returns Desk",
-  sheetName: "Returns Desk",
+  backendUrl: "https://script.google.com/macros/s/AKfycbxqsd5qgS8R9OfDhZ-swHGkuWa60KxWAu0vrXXxVclx44YqPvNrD-ViEOcXTcVMHo05Wg/exec",
 };
